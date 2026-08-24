@@ -54,7 +54,7 @@ export default {
       return withCors(Response.json({ error: { message: 'Invalid request body.' } }, { status: 400 }));
     }
 
-    const model = body.model || 'gemini-3.5-flash';
+    const model = body.model || 'gemini-3.1-flash-lite';
 
     let upstream;
     try {

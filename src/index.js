@@ -11,6 +11,22 @@
 // old Netlify function, it needs to explicitly allow cross-origin requests
 // from the site (see ALLOWED_ORIGIN below) — the browser would otherwise
 // silently block the response.
+//
+// --- Setup, one time ---
+//   1. Push this whole folder (src/index.js + wrangler.toml) as its own new
+//      GitHub repo — keep it separate from the Lumina site's repo so the
+//      two deploy pipelines (Cloudflare here, Netlify there) never confuse
+//      each other.
+//   2. In the Cloudflare dashboard: Workers & Pages -> Create application ->
+//      Import an existing Git repository -> pick this repo -> Deploy.
+//   3. After it deploys: open the Worker -> Settings -> Variables and
+//      Secrets -> Add -> name it GEMINI_API_KEY, paste your key, set the
+//      type to Secret (not plaintext) -> Save and deploy.
+//   4. Copy the Worker's URL shown at the top of its dashboard page — looks
+//      like https://lumina-proxy.<your-subdomain>.workers.dev
+//   5. Come back and I'll wire that URL into index.html's API_URL constant,
+//      replacing the old '/api/chat' Netlify path. index.html itself stays
+//      on Netlify, completely unchanged otherwise.
 
 const ALLOWED_ORIGIN = 'https://lumina1ai.netlify.app';
 
@@ -23,6 +39,9 @@ function withCors(response) {
 
 export default {
   async fetch(request, env) {
+    // Browsers send a preflight OPTIONS request before a cross-origin POST
+    // with a JSON body — this has to be answered before Gemini even enters
+    // the picture, or the real request never gets sent.
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
@@ -54,7 +73,7 @@ export default {
       return withCors(Response.json({ error: { message: 'Invalid request body.' } }, { status: 400 }));
     }
 
-    const model = body.model || 'gemini-3.1-flash-lite';
+    const model = body.model || 'gemini-3.7-flash';
 
     let upstream;
     try {

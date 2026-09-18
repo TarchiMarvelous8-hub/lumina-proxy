@@ -55,7 +55,7 @@ export default {
     }
 
     if (request.method !== 'POST') {
-      return withCors(new Response('Method Not Allowed', { status: 405 }));
+      return withCors(Response.json({ error: { message: 'Method Not Allowed' } }, { status: 405 }));
     }
 
     const apiKey = env.GEMINI_API_KEY;
@@ -97,7 +97,24 @@ export default {
     }
 
     const data = await upstream.text();
-    return withCors(new Response(data, {
+    // Gemini's own infrastructure occasionally returns something that isn't
+    // valid JSON at all — not a normal API error (those always come back as
+    // clean JSON straight from the model), but a raw failure from Google's
+    // edge/load-balancer layer, usually during a bout of overload on their
+    // end. Blindly relaying that mislabeled as JSON just breaks the
+    // client's JSON.parse and produces a confusing "check your own Worker"
+    // message — even though the Worker did its job correctly. Validate
+    // first, so a genuine upstream hiccup gets reported honestly as one.
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch (err) {
+      return withCors(Response.json(
+        { error: { message: `Gemini's own servers returned something unexpected (not valid JSON) — this is almost always a transient overload on Google's end, not a problem with the key, model, or this Worker. Original status from Gemini: ${upstream.status}.` } },
+        { status: 502 }
+      ));
+    }
+    return withCors(new Response(JSON.stringify(parsed), {
       status: upstream.status,
       headers: { 'Content-Type': 'application/json' }
     }));

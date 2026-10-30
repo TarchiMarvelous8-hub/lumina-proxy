@@ -75,23 +75,34 @@ export default {
 
     const model = body.model || 'gemini-3.7-flash';
 
+    // Optional extras from the app (for example a higher "thinking level" on
+    // the small Lite models, which otherwise barely think before answering).
+    // Only generationConfig is passed through — nothing else from the browser.
+    const callGemini = (withConfig) => fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify({
+          system_instruction: body.system_instruction,
+          contents: body.contents,
+          tools: body.tools,
+          ...(withConfig && body.generationConfig ? { generationConfig: body.generationConfig } : {})
+        })
+      }
+    );
+
     let upstream;
     try {
-      upstream = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey
-          },
-          body: JSON.stringify({
-            system_instruction: body.system_instruction,
-            contents: body.contents,
-            tools: body.tools
-          })
-        }
-      );
+      upstream = await callGemini(true);
+      // Safety net: if a model rejects the extra settings (400), quietly retry
+      // once without them so chat never breaks because of an optional extra.
+      if (upstream.status === 400 && body.generationConfig) {
+        upstream = await callGemini(false);
+      }
     } catch (err) {
       return withCors(Response.json({ error: { message: 'Could not reach Gemini from the server.' } }, { status: 502 }));
     }

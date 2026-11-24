@@ -158,13 +158,29 @@ export default {
       if (upstream.status === 400 && body.generationConfig) upstream = await callGemini(false, firstExtra);
       if (upstream.status === 400 && autoTool) upstream = await callGemini(true); // this model can't use the tool: just answer
 
-      // Did Gemini choose to search?
+      // Did Gemini choose to search? Small models sometimes handle tools badly (they
+      // write the tool call out as plain text, or return an empty answer), so every
+      // odd outcome below falls back to a plain answer with the results written into
+      // the instructions, which any model handles reliably.
       if (autoTool && upstream.ok) {
-        const first = await upstream.clone().json().catch(() => null);
+        const readJson = async (resp) => { try { return await resp.clone().json(); } catch (e) { return null; } };
+        const textOf = (j) => (((j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map((x) => x.text || '').join('')).trim();
+        const FAKE_CALL = /"action"\s*:\s*"web_search"|"action_input"/i;
+        const lastUser = (() => { const u = [...(body.contents || [])].reverse().find((c) => c.role === 'user'); const t = u && (u.parts || []).find((x) => x.text); return t ? String(t.text) : ''; })();
+        const plainWithResults = async (q) => {
+          const sr = await runSearch(q);
+          if (sr.error) { searchError = sr.error; return callGemini(true); }
+          sources = sr.results.map((x) => ({ title: x.title, url: x.url }));
+          return callGemini(true, { system_instruction: withSearchNote(q, sr.results) });
+        };
+
+        const first = await readJson(upstream);
         const content = first && first.candidates && first.candidates[0] && first.candidates[0].content;
         const fc = content && (content.parts || []).find((x) => x.functionCall && x.functionCall.name === 'web_search');
+        const firstText = textOf(first);
+
         if (fc) {
-          const q = String((fc.functionCall.args && fc.functionCall.args.query) || '').slice(0, 300);
+          const q = String((fc.functionCall.args && fc.functionCall.args.query) || lastUser).slice(0, 300);
           const sr = await runSearch(q);
           const fnResponse = sr.error
             ? { error: 'Live search is unavailable right now. Answer from your own knowledge and say that live results were not available.' }
@@ -175,9 +191,19 @@ export default {
           const modelTurn = Object.assign({ role: 'model' }, content);
           const followUp = [...body.contents, modelTurn, { role: 'user', parts: [{ functionResponse: { name: 'web_search', response: fnResponse } }] }];
           let second = await callGemini(true, { tools: searchTool, toolConfig: { functionCallingConfig: { mode: 'NONE' } }, contents: followUp });
-          // Fallback: if that exchange is rejected, answer with the results written into the instructions instead.
-          if (!second.ok && !sr.error) second = await callGemini(true, { system_instruction: withSearchNote(q, sr.results) });
+          const secondText = second.ok ? textOf(await readJson(second)) : '';
+          if (!second.ok || !secondText || FAKE_CALL.test(secondText)) {
+            // The exchange was rejected, came back empty, or the model wrote another fake tool call.
+            second = sr.error ? await callGemini(true) : await callGemini(true, { system_instruction: withSearchNote(q, sr.results) });
+          }
           upstream = second;
+        } else if (firstText && FAKE_CALL.test(firstText)) {
+          // The model typed a tool call as text instead of calling the tool: do the search it asked for.
+          const qm = firstText.match(/"action_input"\s*:\s*"([^"]{1,300})"/i) || firstText.match(/"query"\s*:\s*"([^"]{1,300})"/i);
+          upstream = await plainWithResults(qm ? qm[1] : lastUser.slice(0, 300));
+        } else if (!firstText) {
+          // Empty answer (often a "STOP" with nothing in it): ask again without the tool.
+          upstream = await callGemini(true);
         }
       }
     } catch (err) {
